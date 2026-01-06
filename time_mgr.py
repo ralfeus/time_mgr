@@ -170,7 +170,6 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
 
             # Check if warning needed
             if time_left <= 10:
-                servicemanager.LogInfoMsg(f"Sending 10-minute warning")
                 try:
                     send_message_to_all_sessions(
                         "Time Warning",
