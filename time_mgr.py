@@ -106,6 +106,8 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
             start = datetime.time(start_hour, start_min)
             end = datetime.time(end_hour, end_min)
             
+            servicemanager.LogInfoMsg(f"Current time: {current_time}, interval: {start} - {end}")
+            
             if start <= end:
                 return start <= current_time <= end
             else:  # Crosses midnight
@@ -135,7 +137,7 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
                 sessions = win32ts.WTSEnumerateSessions(win32ts.WTS_CURRENT_SERVER_HANDLE, 0, 1)
                 
                 for session in sessions:
-                    session_id = session['SessionId']
+                    session_id = int(session['SessionId'])
                     state = session['State']
                     
                     # Only check active or disconnected sessions
@@ -157,7 +159,8 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
                             
             except Exception as e:
                 servicemanager.LogErrorMsg(f"Error enumerating sessions: {e}")
-                
+        else:
+            servicemanager.LogInfoMsg(f"Allowed time")
     def main(self):
         """Main service loop"""
         while self.is_alive:
