@@ -10,8 +10,10 @@ import yaml
 import requests
 import time
 import os
+import sys
 import datetime
 from pathlib import Path
+from warn import send_message_to_all_sessions
 
 class TimeMonitorService(win32serviceutil.ServiceFramework):
     _svc_name_ = 'TimeMonitorService'
@@ -23,6 +25,7 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
         self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
         self.is_alive = True
         self.config_file = os.path.join(os.path.dirname(__file__), 'time_config.yaml')
+        self.last_warning_date = None
         
     def SvcStop(self):
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
@@ -116,7 +119,43 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
         except Exception as e:
             servicemanager.LogErrorMsg(f"Error parsing time range: {e}")
             return True
-            
+
+    def get_end_datetime(self, config):
+        """Get the datetime when allowed time ends for today"""
+        if not config or 'days' not in config:
+            return None
+
+        now = datetime.datetime.now()
+        day_name = now.strftime('%A').lower()
+
+        if day_name not in config['days']:
+            return None
+
+        time_range = config['days'][day_name]
+        if time_range == 'off' or not time_range:
+            return None
+
+        try:
+            start_time, end_time = time_range.split('-')
+            start_hour, start_min = map(int, start_time.split(':'))
+            end_hour, end_min = map(int, end_time.split(':'))
+
+            start = datetime.time(start_hour, start_min)
+            end = datetime.time(end_hour, end_min)
+
+            # Create datetime for end time today
+            end_datetime = datetime.datetime.combine(now.date(), end)
+
+            # If end time is before start time, it crosses midnight, so end is tomorrow
+            if end < start:
+                end_datetime += datetime.timedelta(days=1)
+
+            return end_datetime
+
+        except Exception as e:
+            servicemanager.LogErrorMsg(f"Error parsing time range: {e}")
+            return None
+
     def logoff_user_session(self, session_id):
         """Log off a user session"""
         try:
@@ -134,6 +173,8 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
         
         if not self.is_time_allowed(config):
             try:
+                servicemanager.LogInfoMsg(f"It's time to log off")
+                servicemanager.LogInfoMsg(str(win32ts.WTS_CURRENT_SERVER_HANDLE))
                 sessions = win32ts.WTSEnumerateSessions(win32ts.WTS_CURRENT_SERVER_HANDLE, 0, 1)
                 
                 for session in sessions:
@@ -161,6 +202,25 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
                 servicemanager.LogErrorMsg(f"Error enumerating sessions: {e}")
         else:
             servicemanager.LogInfoMsg(f"Allowed time")
+
+            # Check if warning needed
+            end_datetime = self.get_end_datetime(config)
+            if end_datetime:
+                now = datetime.datetime.now()
+                time_left = end_datetime - now
+                if datetime.timedelta(minutes=10) >= time_left > datetime.timedelta(0):
+                    today = now.date()
+                    if self.last_warning_date != today:
+                        servicemanager.LogInfoMsg(f"Sending 10-minute warning")
+                        try:
+                            send_message_to_all_sessions(
+                                "Time Warning",
+                                f"Only {int(time_left.total_seconds() // 60)} minutes left until automatic logoff.",
+                                30
+                            )
+                            self.last_warning_date = today
+                        except Exception as e:
+                            servicemanager.LogErrorMsg(f"Error sending warning: {e}")
     def main(self):
         """Main service loop"""
         while self.is_alive:
@@ -171,7 +231,7 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
                 break
 
 if __name__ == '__main__':
-    if len(os.sys.argv) == 1:
+    if len(sys.argv) == 1:
         servicemanager.Initialize()
         servicemanager.PrepareToHostSingle(TimeMonitorService)
         servicemanager.StartServiceCtrlDispatcher()
