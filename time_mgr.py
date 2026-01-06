@@ -74,10 +74,13 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
         try:
             # Get user token for the session
             user_token = win32ts.WTSQueryUserToken(session_id)
-            
+            impersonation_token = win32security.DuplicateToken(
+                user_token,
+                win32security.SecurityImpersonation
+            )            
             # Check if user is in administrators group
             admin_sid = win32security.CreateWellKnownSid(win32security.WinBuiltinAdministratorsSid)
-            is_admin = win32security.CheckTokenMembership(user_token, admin_sid)
+            is_admin = win32security.CheckTokenMembership(impersonation_token, admin_sid)
             
             win32api.CloseHandle(user_token)
             return is_admin
@@ -174,7 +177,6 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
         if not self.is_time_allowed(config):
             try:
                 servicemanager.LogInfoMsg(f"It's time to log off")
-                servicemanager.LogInfoMsg(str(win32ts.WTS_CURRENT_SERVER_HANDLE))
                 sessions = win32ts.WTSEnumerateSessions(win32ts.WTS_CURRENT_SERVER_HANDLE, 1, 0)
                 
                 for session in sessions:
