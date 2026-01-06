@@ -18,7 +18,7 @@ from warn import send_message_to_all_sessions
 class TimeMonitorService(win32serviceutil.ServiceFramework):
     _svc_name_ = 'TimeMonitorService'
     _svc_display_name_ = 'Time Monitor Service'
-    _svc_description_ = 'Monitors user session time and logs off non-admin users outside allowed hours'
+    _svc_description_ = 'Monitors user session time and locks non-admin users outside allowed hours'
     
     def __init__(self, args):
         win32serviceutil.ServiceFramework.__init__(self, args)
@@ -88,95 +88,58 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
             servicemanager.LogErrorMsg(f"Error checking admin status: {e}")
             return True  # Default to admin to avoid accidental logoffs
             
-    def is_time_allowed(self, config):
+    def is_time_allowed(self, config) -> tuple[bool, int]:
         """Check if current time is within allowed hours"""
         if not config or 'days' not in config:
-            return True
+            return (True, 1000)
             
         now = datetime.datetime.now()
         day_name = now.strftime('%A').lower()
         
         if day_name not in config['days']:
-            return False
+            return (False, 1000)
             
         time_range = config['days'][day_name]
         if time_range == 'off' or not time_range:
-            return False
+            return (False, 1000)
             
         try:
             start_time, end_time = time_range.split('-')
             start_hour, start_min = map(int, start_time.split(':'))
             end_hour, end_min = map(int, end_time.split(':'))
             
-            current_time = now.time()
-            start = datetime.time(start_hour, start_min)
-            end = datetime.time(end_hour, end_min)
+            start = now.replace(hour=start_hour, minute=start_min, second=0)
+            end = now.replace(hour=end_hour, minute=end_min, second=0)
+            if start >= end:
+                end += datetime.timedelta(days=1)
             
-            servicemanager.LogInfoMsg(f"Current time: {current_time}, interval: {start} - {end}")
+            servicemanager.LogInfoMsg(f"Current time: {now}, interval: {start} - {end}")
             
-            if start <= end:
-                return start <= current_time <= end
-            else:  # Crosses midnight
-                return current_time >= start or current_time <= end
+            return (start <= now <= end, int((end - now).total_seconds() / 60))
                 
         except Exception as e:
             servicemanager.LogErrorMsg(f"Error parsing time range: {e}")
-            return True
+            return (True, False)
 
-    def get_end_datetime(self, config):
-        """Get the datetime when allowed time ends for today"""
-        if not config or 'days' not in config:
-            return None
-
-        now = datetime.datetime.now()
-        day_name = now.strftime('%A').lower()
-
-        if day_name not in config['days']:
-            return None
-
-        time_range = config['days'][day_name]
-        if time_range == 'off' or not time_range:
-            return None
-
+    def lock_user_session(self, session_id):
+        """Lock a user session"""
         try:
-            start_time, end_time = time_range.split('-')
-            start_hour, start_min = map(int, start_time.split(':'))
-            end_hour, end_min = map(int, end_time.split(':'))
-
-            start = datetime.time(start_hour, start_min)
-            end = datetime.time(end_hour, end_min)
-
-            # Create datetime for end time today
-            end_datetime = datetime.datetime.combine(now.date(), end)
-
-            # If end time is before start time, it crosses midnight, so end is tomorrow
-            if end < start:
-                end_datetime += datetime.timedelta(days=1)
-
-            return end_datetime
-
-        except Exception as e:
-            servicemanager.LogErrorMsg(f"Error parsing time range: {e}")
-            return None
-
-    def logoff_user_session(self, session_id):
-        """Log off a user session"""
-        try:
-            result = win32ts.WTSLogoffSession(win32ts.WTS_CURRENT_SERVER_HANDLE, session_id, False)
+            result = win32ts.WTSDisconnectSession(win32ts.WTS_CURRENT_SERVER_HANDLE, session_id, False)
             if result:
-                servicemanager.LogInfoMsg(f"Successfully logged off session {session_id}")
+                servicemanager.LogInfoMsg(f"Successfully locked session {session_id}")
             else:
-                servicemanager.LogErrorMsg(f"Failed to log off session {session_id}")
+                servicemanager.LogErrorMsg(f"Failed to lock session {session_id}")
         except Exception as e:
-            servicemanager.LogErrorMsg(f"Error logging off session {session_id}: {e}")
+            servicemanager.LogErrorMsg(f"Error locking session {session_id}: {e}")
             
     def check_sessions(self):
-        """Check all active sessions and log off non-admin users if outside time range"""
+        """Check all active sessions and lock non-admin users if outside time range"""
         config = self.load_time_config()
-        
-        if not self.is_time_allowed(config):
+
+        (time_allowed, time_left) = self.is_time_allowed(config)
+        if not time_allowed:
             try:
-                servicemanager.LogInfoMsg(f"It's time to log off")
+                servicemanager.LogInfoMsg(f"It's time to lock")
                 sessions = win32ts.WTSEnumerateSessions(win32ts.WTS_CURRENT_SERVER_HANDLE, 1, 0)
                 
                 for session in sessions:
@@ -194,8 +157,8 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
                             )
                             
                             if username and not self.is_user_admin(session_id):
-                                servicemanager.LogInfoMsg(f"Logging off non-admin user: {username} (Session {session_id})")
-                                self.logoff_user_session(session_id)
+                                servicemanager.LogInfoMsg(f"Locking non-admin user: {username} (Session {session_id})")
+                                self.lock_user_session(session_id)
                                 
                         except Exception as e:
                             servicemanager.LogErrorMsg(f"Error processing session {session_id}: {e}")
@@ -203,26 +166,19 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
             except Exception as e:
                 servicemanager.LogErrorMsg(f"Error enumerating sessions: {e}")
         else:
-            servicemanager.LogInfoMsg(f"Allowed time")
+            servicemanager.LogInfoMsg(f"Allowed time. {time_left} minutes left")
 
             # Check if warning needed
-            end_datetime = self.get_end_datetime(config)
-            if end_datetime:
-                now = datetime.datetime.now()
-                time_left = end_datetime - now
-                if datetime.timedelta(minutes=10) >= time_left > datetime.timedelta(0):
-                    today = now.date()
-                    if self.last_warning_date != today:
-                        servicemanager.LogInfoMsg(f"Sending 10-minute warning")
-                        try:
-                            send_message_to_all_sessions(
-                                "Time Warning",
-                                f"Only {int(time_left.total_seconds() // 60)} minutes left until automatic logoff.",
-                                30
-                            )
-                            self.last_warning_date = today
-                        except Exception as e:
-                            servicemanager.LogErrorMsg(f"Error sending warning: {e}")
+            if time_left <= 10:
+                servicemanager.LogInfoMsg(f"Sending 10-minute warning")
+                try:
+                    send_message_to_all_sessions(
+                        "Time Warning",
+                        f"Only {time_left} minutes left until automatic lock.",
+                        30
+                    )
+                except Exception as e:
+                    servicemanager.LogErrorMsg(f"Error sending warning: {e}")
     def main(self):
         """Main service loop"""
         while self.is_alive:
