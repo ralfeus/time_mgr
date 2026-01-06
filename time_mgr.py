@@ -175,7 +175,7 @@ class TimeMonitorService(win32serviceutil.ServiceFramework):
             try:
                 servicemanager.LogInfoMsg(f"It's time to log off")
                 servicemanager.LogInfoMsg(str(win32ts.WTS_CURRENT_SERVER_HANDLE))
-                sessions = win32ts.WTSEnumerateSessions(win32ts.WTS_CURRENT_SERVER_HANDLE, 0, 1)
+                sessions = win32ts.WTSEnumerateSessions(win32ts.WTS_CURRENT_SERVER_HANDLE, 1, 0)
                 
                 for session in sessions:
                     session_id = int(session['SessionId'])
